@@ -23,6 +23,7 @@ import (
 	"github.com/docker/libnetwork/netutils"
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/types"
+	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 )
 
@@ -290,7 +291,7 @@ func TestNilRemoteDriver(t *testing.T) {
 		t.Fatal("Expected to fail. But instead succeeded")
 	}
 
-	if err != plugins.ErrNotFound {
+	if _, ok := err.(types.NotFoundError); !ok {
 		t.Fatalf("Did not fail with expected error. Actual error: %v", err)
 	}
 }
@@ -313,8 +314,7 @@ func TestDuplicateNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = controller.NewNetwork(bridgeNetType, "testnetwork",
-		libnetwork.NetworkOptionGeneric(genericOption))
+	_, err = controller.NewNetwork(bridgeNetType, "testnetwork", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,8 +338,9 @@ func TestNetworkName(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected to fail. But instead succeeded")
 	}
-	if err != libnetwork.ErrInvalidName {
-		t.Fatal("Expected to fail with ErrInvalidName error")
+
+	if _, ok := err.(libnetwork.ErrInvalidName); !ok {
+		t.Fatalf("Expected to fail with ErrInvalidName error. Got %v", err)
 	}
 
 	networkName := "testnetwork"
@@ -475,8 +476,8 @@ func TestUnknownEndpoint(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected to fail. But instead succeeded")
 	}
-	if err != libnetwork.ErrInvalidName {
-		t.Fatal("Expected to fail with ErrInvalidName error")
+	if _, ok := err.(libnetwork.ErrInvalidName); !ok {
+		t.Fatalf("Expected to fail with ErrInvalidName error. Actual error: %v", err)
 	}
 
 	ep, err := network.CreateEndpoint("testep")
@@ -613,15 +614,15 @@ func TestControllerQuery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("NetworkByName() succeeded with invalid target name")
 	}
-	if err != libnetwork.ErrInvalidName {
-		t.Fatalf("NetworkByName() failed with unexpected error: %v", err)
+	if _, ok := err.(libnetwork.ErrInvalidName); !ok {
+		t.Fatalf("Expected NetworkByName() to fail with ErrInvalidName error. Got: %v", err)
 	}
 
 	_, err = controller.NetworkByID("")
 	if err == nil {
 		t.Fatalf("NetworkByID() succeeded with invalid target id")
 	}
-	if err != libnetwork.ErrInvalidID {
+	if _, ok := err.(libnetwork.ErrInvalidID); !ok {
 		t.Fatalf("NetworkByID() failed with unexpected error: %v", err)
 	}
 
@@ -629,7 +630,7 @@ func TestControllerQuery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Unexpected success for NetworkByID(): %v", g)
 	}
-	if err != libnetwork.ErrNoSuchNetwork {
+	if _, ok := err.(libnetwork.ErrNoSuchNetwork); !ok {
 		t.Fatalf("NetworkByID() failed with unexpected error: %v", err)
 	}
 
@@ -695,15 +696,15 @@ func TestNetworkQuery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("EndpointByName() succeeded with invalid target name")
 	}
-	if err != libnetwork.ErrInvalidName {
-		t.Fatalf("EndpointByName() failed with unexpected error: %v", err)
+	if _, ok := err.(libnetwork.ErrInvalidName); !ok {
+		t.Fatalf("Expected EndpointByName() to fail with ErrInvalidName error. Got: %v", err)
 	}
 
 	e, err = net1.EndpointByName("IamNotAnEndpoint")
 	if err == nil {
 		t.Fatalf("EndpointByName() succeeded with unknown target name")
 	}
-	if err != libnetwork.ErrNoSuchEndpoint {
+	if _, ok := err.(libnetwork.ErrNoSuchEndpoint); !ok {
 		t.Fatal(err)
 	}
 	if e != nil {
@@ -722,12 +723,41 @@ func TestNetworkQuery(t *testing.T) {
 	if err == nil {
 		t.Fatalf("EndpointByID() succeeded with invalid target id")
 	}
-	if err != libnetwork.ErrInvalidID {
+	if _, ok := err.(libnetwork.ErrInvalidID); !ok {
 		t.Fatalf("EndpointByID() failed with unexpected error: %v", err)
 	}
 }
 
 const containerID = "valid_container"
+
+func checkSandbox(t *testing.T, info libnetwork.EndpointInfo) {
+	origns, err := netns.Get()
+	if err != nil {
+		t.Fatalf("Could not get the current netns: %v", err)
+	}
+	defer origns.Close()
+
+	key := info.SandboxKey()
+	f, err := os.OpenFile(key, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("Failed to open network namespace path %q: %v", key, err)
+	}
+	defer f.Close()
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	nsFD := f.Fd()
+	if err = netns.Set(netns.NsHandle(nsFD)); err != nil {
+		t.Fatalf("Setting to the namespace pointed to by the sandbox %s failed: %v", key, err)
+	}
+	defer netns.Set(origns)
+
+	_, err = netlink.LinkByName("eth0")
+	if err != nil {
+		t.Fatalf("Could not find the interface eth0 inside the sandbox: %v", err)
+	}
+}
 
 func TestEndpointJoin(t *testing.T) {
 	if !netutils.IsRunningInContainer() {
@@ -785,6 +815,8 @@ func TestEndpointJoin(t *testing.T) {
 	if info.SandboxKey() == "" {
 		t.Fatalf("Expected an non-empty sandbox key for a joined endpoint. Instead found a empty sandbox key")
 	}
+
+	checkSandbox(t, info)
 }
 
 func TestEndpointJoinInvalidContainerId(t *testing.T) {
@@ -891,7 +923,7 @@ func TestEndpointMultipleJoins(t *testing.T) {
 		t.Fatal("Expected to fail multiple joins for the same endpoint")
 	}
 
-	if err != libnetwork.ErrInvalidJoin {
+	if _, ok := err.(libnetwork.ErrInvalidJoin); !ok {
 		t.Fatalf("Failed for unexpected reason: %v", err)
 	}
 }
@@ -917,7 +949,7 @@ func TestEndpointInvalidLeave(t *testing.T) {
 	}
 
 	if _, ok := err.(libnetwork.InvalidContainerIDError); !ok {
-		if err != libnetwork.ErrNoContainer {
+		if _, ok := err.(libnetwork.ErrNoContainer); !ok {
 			t.Fatalf("Failed for unexpected reason: %v", err)
 		}
 	}
@@ -1276,6 +1308,10 @@ func TestValidRemoteDriver(t *testing.T) {
 		w.Header().Set("Content-Type", "application/vnd.docker.plugins.v1+json")
 		fmt.Fprintf(w, `{"Implements": ["%s"]}`, driverapi.NetworkPluginEndpointType)
 	})
+	mux.HandleFunc(fmt.Sprintf("/%s.CreateNetwork", driverapi.NetworkPluginEndpointType), func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.docker.plugins.v1+json")
+		fmt.Fprintf(w, "null")
+	})
 
 	if err := os.MkdirAll("/usr/share/docker/plugins", 0755); err != nil {
 		t.Fatal(err)
@@ -1297,7 +1333,7 @@ func TestValidRemoteDriver(t *testing.T) {
 
 	_, err = controller.NewNetwork("valid-network-driver", "dummy",
 		libnetwork.NetworkOptionGeneric(getEmptyGenericOption()))
-	if err != nil && err != driverapi.ErrNotImplemented {
+	if err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1371,8 +1407,10 @@ func parallelJoin(t *testing.T, ep libnetwork.Endpoint, thrNumber int) {
 	_, err := ep.Join("racing_container")
 	runtime.LockOSThread()
 	if err != nil {
-		if err != libnetwork.ErrNoContainer && err != libnetwork.ErrInvalidJoin {
-			t.Fatal(err)
+		if _, ok := err.(libnetwork.ErrNoContainer); !ok {
+			if _, ok := err.(libnetwork.ErrInvalidJoin); !ok {
+				t.Fatal(err)
+			}
 		}
 		debugf("JE%d(%v).", thrNumber, err)
 	}
@@ -1384,8 +1422,10 @@ func parallelLeave(t *testing.T, ep libnetwork.Endpoint, thrNumber int) {
 	err := ep.Leave("racing_container")
 	runtime.LockOSThread()
 	if err != nil {
-		if err != libnetwork.ErrNoContainer && err != libnetwork.ErrInvalidJoin {
-			t.Fatal(err)
+		if _, ok := err.(libnetwork.ErrNoContainer); !ok {
+			if _, ok := err.(libnetwork.ErrInvalidJoin); !ok {
+				t.Fatal(err)
+			}
 		}
 		debugf("LE%d(%v).", thrNumber, err)
 	}

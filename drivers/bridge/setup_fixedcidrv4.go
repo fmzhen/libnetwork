@@ -1,8 +1,10 @@
 package bridge
 
-import log "github.com/Sirupsen/logrus"
+import (
+	log "github.com/Sirupsen/logrus"
+)
 
-func setupFixedCIDRv4(config *NetworkConfiguration, i *bridgeInterface) error {
+func setupFixedCIDRv4(config *networkConfiguration, i *bridgeInterface) error {
 	addrv4, _, err := i.addresses()
 	if err != nil {
 		return err
@@ -10,7 +12,7 @@ func setupFixedCIDRv4(config *NetworkConfiguration, i *bridgeInterface) error {
 
 	log.Debugf("Using IPv4 subnet: %v", config.FixedCIDR)
 	if err := ipAllocator.RegisterSubnet(addrv4.IPNet, config.FixedCIDR); err != nil {
-		return &FixedCIDRv4Error{subnet: config.FixedCIDR, net: addrv4.IPNet, err: err}
+		return &FixedCIDRv4Error{Subnet: config.FixedCIDR, Net: addrv4.IPNet, Err: err}
 	}
 
 	return nil
